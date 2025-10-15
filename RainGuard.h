@@ -1,0 +1,97 @@
+#ifndef RAINGUARD_H
+#define RAINGUARD_H
+
+#include <Arduino.h>
+#include <WiFiS3.h>
+#include <ArduinoJson.h>
+
+// Consulta Open-Meteo y decide si bloquear riego por lluvia.
+// Uso típico:
+//   RainGuard rain(lat, lon, 70);
+//   rain.refresh(); if (rain.shouldBlockToday()) { ... }
+class RainGuard {
+  float   _lat;
+  float   _lon;
+  uint8_t _threshold;        // %
+  bool    _cachedDecision;
+  uint8_t _cachedProb;       // %
+  uint16_t _lastY; uint8_t _lastM; uint8_t _lastD;
+
+  static bool waitHeaders(WiFiSSLClient& c, uint32_t timeoutMs) {
+    uint32_t t0 = millis(); String line;
+    while (millis() - t0 < timeoutMs) {
+      while (c.available()) {
+        char ch = c.read(); line += ch;
+        if (line.endsWith("\r\n\r\n")) return true;
+      }
+    }
+    return false;
+  }
+
+  static String readBody(WiFiSSLClient& c, uint32_t timeoutMs) {
+    uint32_t t0 = millis(); String out;
+    while (millis() - t0 < timeoutMs) {
+      while (c.available()) { out += (char)c.read(); t0 = millis(); }
+    }
+    return out;
+  }
+
+  static void parseISO(const char* iso, uint16_t& y, uint8_t& m, uint8_t& d) {
+    // "YYYY-MM-DD"
+    if (!iso || strlen(iso) < 10) { y=0; m=0; d=0; return; }
+    y = (iso[0]-'0')*1000 + (iso[1]-'0')*100 + (iso[2]-'0')*10 + (iso[3]-'0');
+    m = (iso[5]-'0')*10 + (iso[6]-'0');
+    d = (iso[8]-'0')*10 + (iso[9]-'0');
+  }
+
+public:
+  RainGuard(float lat, float lon, uint8_t thresholdPct = 70)
+  : _lat(lat), _lon(lon), _threshold(thresholdPct),
+    _cachedDecision(false), _cachedProb(0), _lastY(0), _lastM(0), _lastD(0) {}
+
+  void setLocation(float lat, float lon) { _lat = lat; _lon = lon; }
+  void setThreshold(uint8_t pct) { _threshold = pct; }
+  uint8_t cachedProbability() const { return _cachedProb; }
+  bool shouldBlockToday() const { return _cachedDecision; }
+
+  // Llama después de tener WiFi conectado
+  bool refresh() {
+    if (WiFi.status() != WL_CONNECTED) return false;
+
+    WiFiSSLClient client;
+    if (!client.connect("api.open-meteo.com", 443)) return false;
+
+    String url = String("/v1/forecast?latitude=") + String(_lat, 4) +
+                 "&longitude=" + String(_lon, 4) +
+                 "&daily=precipitation_probability_max&timezone=auto";
+
+    client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+                 "Host: api.open-meteo.com\r\n" +
+                 "User-Agent: UNO-R4/1.0\r\n" +
+                 "Connection: close\r\n\r\n");
+
+    if (!waitHeaders(client, 6000)) { client.stop(); return false; }
+    String body = readBody(client, 8000);
+    client.stop();
+    if (body.length() == 0) return false;
+
+    StaticJsonDocument<2048> doc;
+    auto err = deserializeJson(doc, body);
+    if (err) return false;
+
+    JsonObject daily = doc["daily"];
+    if (daily.isNull()) return false;
+    JsonArray timeArr = daily["time"].as<JsonArray>();
+    JsonArray probArr = daily["precipitation_probability_max"].as<JsonArray>();
+    if (timeArr.isNull() || probArr.isNull() || timeArr.size()==0 || probArr.size()==0) return false;
+
+    const char* iso0 = timeArr[0] | "";
+    parseISO(iso0, _lastY, _lastM, _lastD);
+
+    _cachedProb = probArr[0] | 0;
+    _cachedDecision = (_cachedProb >= _threshold);
+    return true;
+  }
+};
+
+#endif
