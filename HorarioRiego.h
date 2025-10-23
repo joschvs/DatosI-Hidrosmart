@@ -47,9 +47,11 @@ class HorarioRiego {
 
     // Determina si hoy y ahora corresponde regar
     bool debeRegar(uint32_t dayCount, uint16_t minutesNow) {
+      
       if (!habilitado) return false;
 
       bool tocaHoy;
+    
       if (lastStartDay == 0) {
         tocaHoy = (dayCount % cadaNDias) == 0;   // Primer ciclo
       } else {
